@@ -1,0 +1,48 @@
+name: VisaMetric Slot Checker
+
+on:
+  schedule:
+    # Runs every hour (24 times/day). Cron is UTC time.
+    # Ireland is UTC+1 (IST) — adjust if needed
+    - cron: "0 * * * *"
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  check-slots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            tesseract-ocr \
+            libgl1-mesa-glx \
+            libglib2.0-0 \
+            chromium-browser \
+            chromium-chromedriver \
+            --no-install-recommends
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run slot checker
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_TELEGRAM_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          python src/checker.py
