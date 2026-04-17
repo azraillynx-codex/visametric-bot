@@ -2,10 +2,8 @@ name: VisaMetric Slot Checker
 
 on:
   schedule:
-    # Runs every hour (24 times/day). Cron is UTC time.
-    # Ireland is UTC+1 (IST) — adjust if needed
     - cron: "0 * * * *"
-  workflow_dispatch:  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   check-slots:
@@ -28,14 +26,9 @@ jobs:
             tesseract-ocr \
             libgl1 \
             libglib2.0-0 \
-            chromium-browser \
-            --no-install-recommends || \
-          sudo apt-get install -y \
-            tesseract-ocr \
-            libgl1 \
-            libglib2.0-0 \
-            chromium \
             --no-install-recommends
+          sudo apt-get install -y chromium-browser --no-install-recommends || \
+          sudo apt-get install -y chromium --no-install-recommends
 
       - name: Install Python dependencies
         run: |
@@ -51,3 +44,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           python src/checker.py
+
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots-${{ github.run_number }}
+          path: debug_screenshots/
+          retention-days: 3
