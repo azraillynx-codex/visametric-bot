@@ -33,6 +33,7 @@ GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 ADMIN_EMAIL        = os.environ["ADMIN_EMAIL"]
 ADMIN_TELEGRAM_ID  = os.environ["ADMIN_TELEGRAM_CHAT_ID"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+PROXY_URL          = os.environ.get("PROXY_URL", "")  # Optional: e.g. http://user:pass@host:port
 
 # ── USERS CONFIG ──────────────────────────────────────────────────────────────
 USERS = [
@@ -217,12 +218,24 @@ def get_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1280,900")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--lang=en-US,en")
+    options.add_argument("--accept-lang=en-US,en;q=0.9")
+    # Use real Chrome version in user-agent for consistency
     options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
     )
+    # Route through residential proxy if configured
+    if PROXY_URL:
+        log.info(f"Using proxy: {PROXY_URL.split('@')[-1]}")
+        options.add_argument(f"--proxy-server={PROXY_URL}")
+    else:
+        log.warning("No PROXY_URL set — GitHub Actions IP may be blocked by Cloudflare")
     return uc.Chrome(options=options, version_main=chrome_version)
 
 
