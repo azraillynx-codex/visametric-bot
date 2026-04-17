@@ -18,6 +18,14 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 import undetected_chromedriver as uc
+try:
+    # selenium-wire handles authenticated HTTP proxy at Python level
+    # (Chrome's --proxy-server flag silently drops credentials since Chrome 72)
+    import seleniumwire.undetected_chromedriver as ucwire
+    SELENIUMWIRE_AVAILABLE = True
+except ImportError:
+    SELENIUMWIRE_AVAILABLE = False
+    log_import_warn = True
 
 # ── LOGGING SETUP ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -74,14 +82,21 @@ def save_screenshot(driver, label: str) -> str:
 def detect_block(driver) -> str:
     title  = driver.title.lower()
     source = driver.page_source.lower()
+    url    = driver.current_url.lower()
+    # Proxy errors: page fails to load entirely
+    if "this site can\u2019t be reached" in source or "err_no_supported_proxies" in source:
+        return "PROXY_ERROR"
+    if "err_proxy" in source or "proxy" in title and "error" in title:
+        return "PROXY_ERROR"
+    # Cloudflare
     if "just a moment" in title or "just a moment" in source:
         return "CLOUDFLARE_CHALLENGE"
+    if "attention required" in title or ("ray id" in source and "cloudflare" in source):
+        return "CLOUDFLARE_BLOCK"
     if "access denied" in title or "access denied" in source:
         return "ACCESS_DENIED"
     if "403" in title or "403 forbidden" in source:
         return "403_FORBIDDEN"
-    if "ray id" in source and "cloudflare" in source:
-        return "CLOUDFLARE_BLOCK"
     if "captcha" not in source and "verification" not in source and "appointment" not in source:
         return "UNEXPECTED_PAGE"
     return "none"
@@ -142,23 +157,38 @@ def notify(user: dict, subject: str, message: str, screenshot: str = None):
 def solve_captcha(driver) -> str:
     try:
         selectors = [
-            "img[src*='captcha']", ".captcha-image img", ".captcha img",
-            "#captcha img", "img[alt*='captcha']", "img[class*='captcha']",
+            "img[src*='captcha']", "img[src*='Captcha']",
+            ".captcha-image img", ".captcha img",
+            "#captcha img", "#captchaImg", "img#captcha",
+            "img[alt*='captcha']", "img[alt*='Captcha']",
+            "img[class*='captcha']", "img[id*='captcha']",
+            ".col-md-4 img", "form img",
         ]
         captcha_img = None
         for sel in selectors:
             els = driver.find_elements(By.CSS_SELECTOR, sel)
             if els:
                 captcha_img = els[0]
-                log.debug(f"Captcha img found: {sel}")
+                log.debug(f"Captcha img found via: {sel}")
                 break
 
         if captcha_img is None:
-            log.warning("No captcha image found on page")
+            # Last resort: grab ALL images and log them
+            all_imgs = driver.find_elements(By.TAG_NAME, "img")
+            log.warning(f"No captcha img found. All imgs on page ({len(all_imgs)}):")
+            for i, img in enumerate(all_imgs):
+                log.warning(f"  img[{i}] src={img.get_attribute('src', '')[:80]} "
+                            f"class={img.get_attribute('class')} "
+                            f"id={img.get_attribute('id')} "
+                            f"alt={img.get_attribute('alt')}")
             return ""
 
-        src = captcha_img.get_attribute("src")
+        src = captcha_img.get_attribute("src") or ""
         log.debug(f"Captcha src: {'base64' if src.startswith('data:') else src[:80]}")
+
+        if not src:
+            log.warning("Captcha img has no src attribute")
+            return ""
 
         if src.startswith("data:image"):
             _, data = src.split(",", 1)
@@ -173,10 +203,20 @@ def solve_captcha(driver) -> str:
 
         nparr   = np.frombuffer(img_bytes, np.uint8)
         img     = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            log.error("cv2 could not decode captcha image bytes")
+            return ""
+        log.debug(f"Captcha image shape: {img.shape}")
+
         gray    = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, thr  = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV)
         den     = cv2.fastNlMeansDenoising(thr, h=30)
         scaled  = cv2.resize(den, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+
+        # Save processed image for debugging
+        proc_path = f"{SCREENSHOTS_DIR}/captcha_processed_{datetime.now().strftime('%H%M%S')}.png"
+        cv2.imwrite(proc_path, scaled)
+        log.debug(f"Processed captcha saved: {proc_path}")
 
         result = pytesseract.image_to_string(
             Image.fromarray(scaled),
@@ -225,26 +265,30 @@ def get_driver():
     options.add_argument("--disable-infobars")
     options.add_argument("--lang=en-US,en")
     options.add_argument("--accept-lang=en-US,en;q=0.9")
-    # Use real Chrome version in user-agent for consistency
     options.add_argument(
         f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
     )
-    # Route through residential proxy if configured
-    if PROXY_URL:
-        # Chrome silently drops credentials from http:// proxy URLs (since Chrome 72).
-        # SOCKS5 with auth DOES work: socks5://user:pass@host:port
-        if PROXY_URL.startswith("http://") and "@" in PROXY_URL:
-            log.error(
-                "PROXY_URL uses http:// with credentials — Chrome will IGNORE auth "
-                "and fail with ERR_NO_SUPPORTED_PROXIES. "
-                "Change to socks5://user:pass@host:port"
-            )
+
+    # ── Proxy via selenium-wire (handles HTTP auth that Chrome can't do natively) ──
+    if PROXY_URL and SELENIUMWIRE_AVAILABLE:
         host_part = PROXY_URL.split("@")[-1]
-        log.info(f"Using proxy: {host_part}")
-        options.add_argument(f"--proxy-server={PROXY_URL}")
+        log.info(f"Using selenium-wire proxy: {host_part}")
+        sw_options = {
+            "proxy": {
+                "http":  PROXY_URL,
+                "https": PROXY_URL,
+                "no_proxy": "localhost,127.0.0.1"
+            },
+            "verify_ssl": False,
+        }
+        return ucwire.Chrome(options=options, seleniumwire_options=sw_options, version_main=chrome_version)
+    elif PROXY_URL and not SELENIUMWIRE_AVAILABLE:
+        log.error("selenium-wire not installed! Install it: pip install selenium-wire==5.1.0")
+        log.warning("Falling back to no proxy — may be Cloudflare blocked")
     else:
         log.warning("No PROXY_URL set — GitHub Actions IP may be blocked by Cloudflare")
+
     return uc.Chrome(options=options, version_main=chrome_version)
 
 
@@ -295,6 +339,24 @@ def check_for_user(user: dict) -> bool:
         solved = False
         for attempt in range(MAX_CAPTCHA_RETRIES):
             log.info(f"--- Captcha attempt {attempt+1}/{MAX_CAPTCHA_RETRIES} ---")
+
+            # On first attempt: dump page HTML for diagnosis
+            if attempt == 0:
+                html_path = f"{SCREENSHOTS_DIR}/page_source_attempt1.html"
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                log.debug(f"Page HTML dumped to {html_path}")
+                log.debug(f"Page title: {driver.title}")
+                log.debug(f"Page URL: {driver.current_url}")
+                # Log all input fields on page
+                inputs = driver.find_elements(By.TAG_NAME, "input")
+                log.debug(f"Inputs on page ({len(inputs)}):")
+                for inp in inputs:
+                    log.debug(f"  input type={inp.get_attribute('type')} "
+                              f"name={inp.get_attribute('name')} "
+                              f"id={inp.get_attribute('id')} "
+                              f"placeholder={inp.get_attribute('placeholder')}")
+
             captcha_text = solve_captcha(driver)
 
             if len(captcha_text) != 4:
