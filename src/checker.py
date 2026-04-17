@@ -191,7 +191,27 @@ def solve_captcha(driver) -> str:
 
 
 # ── DRIVER ────────────────────────────────────────────────────────────────────
+def _get_chrome_major_version() -> int:
+    """Detect the installed Chrome major version so we can pin ChromeDriver."""
+    import subprocess
+    for binary in ("/bin/google-chrome-stable", "/usr/bin/google-chrome",
+                   "/usr/bin/chromium-browser", "/usr/bin/chromium"):
+        try:
+            out = subprocess.check_output(
+                [binary, "--version"], stderr=subprocess.DEVNULL
+            ).decode().strip()
+            match = re.search(r"(\d+)\.", out)
+            if match:
+                version = int(match.group(1))
+                log.debug(f"Detected Chrome {version} from {binary}")
+                return version
+        except Exception:
+            continue
+    log.warning("Could not detect Chrome version, defaulting to 146")
+    return 146
+
 def get_driver():
+    chrome_version = _get_chrome_major_version()
     options = uc.ChromeOptions()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -203,7 +223,7 @@ def get_driver():
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
-    return uc.Chrome(options=options)
+    return uc.Chrome(options=options, version_main=chrome_version)
 
 
 # ── DROPDOWN ──────────────────────────────────────────────────────────────────
