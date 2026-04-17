@@ -1,31 +1,40 @@
 import os
+import re
 import time
+import base64
+import logging
 import smtplib
 import requests
 import cv2
 import numpy as np
 import pytesseract
 from PIL import Image
-from io import BytesIO
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from selenium import webdriver
+from email.mime.base import MIMEBase
+from email import encoders
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
 import undetected_chromedriver as uc
 
-# ── ENV VARS (set as GitHub Secrets) ─────────────────────────────────────────
-GMAIL_USER            = os.environ["GMAIL_USER"]
-GMAIL_APP_PASSWORD    = os.environ["GMAIL_APP_PASSWORD"]
-ADMIN_EMAIL           = os.environ["ADMIN_EMAIL"]
-ADMIN_TELEGRAM_ID     = os.environ["ADMIN_TELEGRAM_CHAT_ID"]
-TELEGRAM_BOT_TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
+# ── LOGGING SETUP ─────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+log = logging.getLogger("visametric")
 
-# ── USERS CONFIG ─────────────────────────────────────────────────────────────
-# Add each user here: name, email, telegram_chat_id, and their form preferences
+# ── ENV VARS ──────────────────────────────────────────────────────────────────
+GMAIL_USER         = os.environ["GMAIL_USER"]
+GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
+ADMIN_EMAIL        = os.environ["ADMIN_EMAIL"]
+ADMIN_TELEGRAM_ID  = os.environ["ADMIN_TELEGRAM_CHAT_ID"]
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+
+# ── USERS CONFIG ──────────────────────────────────────────────────────────────
 USERS = [
     {
         "name": "sonn",
@@ -40,96 +49,148 @@ USERS = [
             "applicants": "1 applicant",
         }
     },
-    # Add more users here same way
 ]
 
-TARGET_URL = "https://ie-appointment.visametric.com/en"
+TARGET_URL          = "https://ie-appointment.visametric.com/en"
 MAX_CAPTCHA_RETRIES = 5
+SCREENSHOTS_DIR     = "debug_screenshots"
+os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
 
-# ── TELEGRAM ALERT ────────────────────────────────────────────────────────────
+# ── SCREENSHOT ────────────────────────────────────────────────────────────────
+def save_screenshot(driver, label: str) -> str:
+    ts = datetime.now().strftime("%H%M%S")
+    path = f"{SCREENSHOTS_DIR}/{ts}_{label}.png"
+    try:
+        driver.save_screenshot(path)
+        log.debug(f"Screenshot: {path}")
+    except Exception as e:
+        log.warning(f"Screenshot failed: {e}")
+    return path
+
+
+# ── BLOCK DETECTOR ────────────────────────────────────────────────────────────
+def detect_block(driver) -> str:
+    title  = driver.title.lower()
+    source = driver.page_source.lower()
+    if "just a moment" in title or "just a moment" in source:
+        return "CLOUDFLARE_CHALLENGE"
+    if "access denied" in title or "access denied" in source:
+        return "ACCESS_DENIED"
+    if "403" in title or "403 forbidden" in source:
+        return "403_FORBIDDEN"
+    if "ray id" in source and "cloudflare" in source:
+        return "CLOUDFLARE_BLOCK"
+    if "captcha" not in source and "verification" not in source and "appointment" not in source:
+        return "UNEXPECTED_PAGE"
+    return "none"
+
+
+# ── TELEGRAM ──────────────────────────────────────────────────────────────────
 def send_telegram(chat_id: str, message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+        r = requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+        log.debug(f"Telegram {chat_id}: {r.status_code}")
     except Exception as e:
-        print(f"Telegram error: {e}")
+        log.error(f"Telegram error: {e}")
+
+def send_telegram_photo(chat_id: str, photo_path: str, caption: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        with open(photo_path, "rb") as f:
+            requests.post(url, data={"chat_id": chat_id, "caption": caption}, files={"photo": f}, timeout=15)
+    except Exception as e:
+        log.error(f"Telegram photo error: {e}")
 
 
-# ── EMAIL ALERT ───────────────────────────────────────────────────────────────
-def send_email(to: str, subject: str, body: str):
+# ── EMAIL ─────────────────────────────────────────────────────────────────────
+def send_email(to: str, subject: str, body: str, attachment_path: str = None):
     try:
         msg = MIMEMultipart()
         msg["From"] = GMAIL_USER
-        msg["To"] = to
+        msg["To"]   = to
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "html"))
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_USER, to, msg.as_string())
-        print(f"Email sent to {to}")
+        if attachment_path and os.path.exists(attachment_path):
+            with open(attachment_path, "rb") as f:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(attachment_path)}")
+            msg.attach(part)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+            s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            s.sendmail(GMAIL_USER, to, msg.as_string())
+        log.info(f"Email sent to {to}")
     except Exception as e:
-        print(f"Email error: {e}")
+        log.error(f"Email error: {e}")
 
 
-# ── NOTIFY BOTH CHANNELS ──────────────────────────────────────────────────────
-def notify(user: dict, subject: str, message: str):
+# ── NOTIFY ────────────────────────────────────────────────────────────────────
+def notify(user: dict, subject: str, message: str, screenshot: str = None):
     send_telegram(user["telegram_id"], message)
-    send_email(user["email"], subject, message)
-    # Also notify admin
+    send_email(user["email"], subject, message, screenshot)
     send_telegram(ADMIN_TELEGRAM_ID, f"[{user['name']}] {message}")
-    send_email(ADMIN_EMAIL, f"[{user['name']}] {subject}", message)
+    send_email(ADMIN_EMAIL, f"[{user['name']}] {subject}", message, screenshot)
+    if screenshot and os.path.exists(screenshot):
+        send_telegram_photo(ADMIN_TELEGRAM_ID, screenshot, f"[{user['name']}] {subject}")
 
 
 # ── CAPTCHA SOLVER ────────────────────────────────────────────────────────────
 def solve_captcha(driver) -> str:
-    """
-    Finds the captcha image, preprocesses with OpenCV, reads with Tesseract.
-    Returns the 4-digit string or empty string on failure.
-    """
     try:
-        captcha_img = driver.find_element(By.CSS_SELECTOR, "img[src*='captcha'], .captcha img, #captcha img")
+        selectors = [
+            "img[src*='captcha']", ".captcha-image img", ".captcha img",
+            "#captcha img", "img[alt*='captcha']", "img[class*='captcha']",
+        ]
+        captcha_img = None
+        for sel in selectors:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els:
+                captcha_img = els[0]
+                log.debug(f"Captcha img found: {sel}")
+                break
+
+        if captcha_img is None:
+            log.warning("No captcha image found on page")
+            return ""
+
         src = captcha_img.get_attribute("src")
+        log.debug(f"Captcha src: {'base64' if src.startswith('data:') else src[:80]}")
 
         if src.startswith("data:image"):
-            # Base64 image
-            import base64
-            header, data = src.split(",", 1)
+            _, data = src.split(",", 1)
             img_bytes = base64.b64decode(data)
         else:
-            # URL image
-            resp = requests.get(src, timeout=10)
-            img_bytes = resp.content
+            img_bytes = requests.get(src, timeout=10).content
 
-        # OpenCV preprocessing
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # Threshold to remove noise
-        _, thresh = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV)
-        # Denoise
-        denoised = cv2.fastNlMeansDenoising(thresh, h=30)
-        # Scale up for better OCR
-        scaled = cv2.resize(denoised, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        raw_path = f"{SCREENSHOTS_DIR}/captcha_raw_{datetime.now().strftime('%H%M%S')}.png"
+        with open(raw_path, "wb") as f:
+            f.write(img_bytes)
+        log.debug(f"Raw captcha saved: {raw_path}")
 
-        pil_img = Image.fromarray(scaled)
-        # Tesseract config: only digits, single line
+        nparr   = np.frombuffer(img_bytes, np.uint8)
+        img     = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        gray    = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, thr  = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV)
+        den     = cv2.fastNlMeansDenoising(thr, h=30)
+        scaled  = cv2.resize(den, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+
         result = pytesseract.image_to_string(
-            pil_img,
+            Image.fromarray(scaled),
             config="--psm 8 --oem 3 -c tessedit_char_whitelist=0123456789"
         ).strip()
-
-        # Clean result - keep only digits
         digits = "".join(filter(str.isdigit, result))
-        print(f"Captcha solved: '{digits}'")
+        log.info(f"OCR: raw='{result}' → digits='{digits}'")
         return digits
 
     except Exception as e:
-        print(f"Captcha solve error: {e}")
+        log.error(f"Captcha error: {e}")
         return ""
 
 
-# ── SETUP DRIVER ──────────────────────────────────────────────────────────────
+# ── DRIVER ────────────────────────────────────────────────────────────────────
 def get_driver():
     options = uc.ChromeOptions()
     options.add_argument("--headless=new")
@@ -138,77 +199,141 @@ def get_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1280,900")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    driver = uc.Chrome(options=options)
-    return driver
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    )
+    return uc.Chrome(options=options)
 
 
-# ── FILL DROPDOWN ─────────────────────────────────────────────────────────────
-def select_dropdown(driver, wait, label_or_index: int, value: str):
-    """Select by visible text in the Nth select element (0-indexed)."""
+# ── DROPDOWN ──────────────────────────────────────────────────────────────────
+def select_dropdown(driver, wait, index: int, value: str):
     selects = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "select")))
-    sel = Select(selects[label_or_index])
+    sel = Select(selects[index])
     try:
         sel.select_by_visible_text(value)
+        log.debug(f"Dropdown[{index}] = '{value}'")
     except Exception:
-        # Try partial match
-        for option in sel.options:
-            if value.lower() in option.text.lower():
-                sel.select_by_visible_text(option.text)
+        for opt in sel.options:
+            if value.lower() in opt.text.lower():
+                sel.select_by_visible_text(opt.text)
+                log.debug(f"Dropdown[{index}] partial match = '{opt.text}'")
                 break
     time.sleep(0.8)
 
 
-# ── MAIN CHECK FOR ONE USER ───────────────────────────────────────────────────
+# ── MAIN CHECK ────────────────────────────────────────────────────────────────
 def check_for_user(user: dict) -> bool:
-    """
-    Returns True if a slot was found, False otherwise.
-    """
     driver = get_driver()
-    wait = WebDriverWait(driver, 20)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    prefs = user["prefs"]
+    wait   = WebDriverWait(driver, 20)
+    now    = datetime.now().strftime("%Y-%m-%d %H:%M")
+    prefs  = user["prefs"]
 
     try:
+        log.info(f"GET {TARGET_URL}")
         driver.get(TARGET_URL)
-        time.sleep(3)
+        time.sleep(4)
 
-        # ── STEP 1: Solve captcha and click "Get your appointment" ──
-        solved = False
-        for attempt in range(MAX_CAPTCHA_RETRIES):
-            captcha_text = solve_captcha(driver)
-            if len(captcha_text) == 4:
-                # Enter captcha
-                captcha_input = wait.until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "input[placeholder='VERIFICATION CODE'], input[name*='captcha'], #captcha_input"))
-                )
-                captcha_input.clear()
-                captcha_input.send_keys(captcha_text)
-                time.sleep(0.5)
+        log.info(f"Title: '{driver.title}' | URL: {driver.current_url}")
+        ss_init = save_screenshot(driver, "01_initial_load")
 
-                # Click "Get your appointment"
-                btn = driver.find_element(By.XPATH, "//button[contains(text(),'Get your appointment')] | //a[contains(text(),'Get your appointment')]")
-                btn.click()
-                time.sleep(3)
-
-                # Check if we moved to next page (form page)
-                if "appointment" in driver.current_url or len(driver.find_elements(By.TAG_NAME, "select")) > 0:
-                    solved = True
-                    print(f"Captcha passed on attempt {attempt+1}")
-                    break
-                else:
-                    print(f"Captcha attempt {attempt+1} failed, retrying...")
-                    driver.refresh()
-                    time.sleep(2)
-            else:
-                print(f"OCR returned '{captcha_text}', retrying...")
-                driver.refresh()
-                time.sleep(2)
-
-        if not solved:
-            notify(user, "VisaMetric Check Failed", f"⚠️ <b>Captcha bypass failed</b> after {MAX_CAPTCHA_RETRIES} attempts at {now}. Will retry next scheduled run.")
+        # ── Block check ──
+        block = detect_block(driver)
+        if block != "none":
+            log.error(f"BLOCKED: {block}")
+            notify(user,
+                f"🚫 Bot Blocked: {block}",
+                f"🚫 <b>Bot is BLOCKED</b>\n\nType: <code>{block}</code>\nURL: {driver.current_url}\nTitle: {driver.title}\nTime: {now}\n\nSee screenshot.",
+                ss_init)
             return False
 
-        # ── STEP 2: Fill the form ──
+        log.info("No block detected ✅")
+
+        # ── Captcha loop ──
+        solved = False
+        for attempt in range(MAX_CAPTCHA_RETRIES):
+            log.info(f"--- Captcha attempt {attempt+1}/{MAX_CAPTCHA_RETRIES} ---")
+            captcha_text = solve_captcha(driver)
+
+            if len(captcha_text) != 4:
+                log.warning(f"Bad OCR result '{captcha_text}', refreshing")
+                save_screenshot(driver, f"captcha_bad_{attempt+1}")
+                driver.refresh()
+                time.sleep(3)
+                continue
+
+            # Find input
+            captcha_input = None
+            for sel in ["input[placeholder='VERIFICATION CODE']", "input[placeholder*='verification']",
+                        "input[placeholder*='captcha']", "input[name*='captcha']", ".captcha input"]:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                if els:
+                    captcha_input = els[0]
+                    break
+
+            if not captcha_input:
+                log.error("Captcha input field not found!")
+                save_screenshot(driver, f"no_input_{attempt+1}")
+                break
+
+            captcha_input.clear()
+            captcha_input.send_keys(captcha_text)
+            time.sleep(0.5)
+
+            # Find button
+            btn = None
+            for xpath in ["//button[contains(text(),'Get your appointment')]",
+                          "//a[contains(text(),'Get your appointment')]",
+                          "//button[contains(@class,'btn')]"]:
+                els = driver.find_elements(By.XPATH, xpath)
+                if els:
+                    btn = els[0]
+                    break
+
+            if not btn:
+                log.error("Appointment button not found!")
+                save_screenshot(driver, f"no_btn_{attempt+1}")
+                break
+
+            btn.click()
+            time.sleep(3)
+
+            ss_after = save_screenshot(driver, f"captcha_after_{attempt+1}")
+            log.info(f"Post-click → title: '{driver.title}' url: {driver.current_url}")
+
+            block_after = detect_block(driver)
+            if block_after != "none":
+                log.error(f"Blocked after captcha: {block_after}")
+                notify(user, f"🚫 Blocked: {block_after}",
+                    f"🚫 Blocked after captcha\nType: <code>{block_after}</code>\nURL: {driver.current_url}\nTime: {now}",
+                    ss_after)
+                return False
+
+            if len(driver.find_elements(By.TAG_NAME, "select")) > 0:
+                solved = True
+                log.info(f"✅ Captcha solved on attempt {attempt+1}")
+                break
+
+            log.warning(f"Captcha attempt {attempt+1} failed — no dropdowns found, retrying")
+            driver.refresh()
+            time.sleep(3)
+
+        if not solved:
+            ss_fail = save_screenshot(driver, "captcha_all_failed")
+            log.error(f"All {MAX_CAPTCHA_RETRIES} captcha attempts failed")
+            log.error(f"Final page title: {driver.title}")
+            log.error(f"Final URL: {driver.current_url}")
+            log.error(f"Page source snippet: {driver.page_source[:800]}")
+            notify(user, "⚠️ Captcha Failed",
+                f"⚠️ <b>Captcha bypass failed</b>\n\n"
+                f"👤 {user['name']}\n🕒 {now}\n"
+                f"📄 Title: {driver.title}\n🌐 URL: {driver.current_url}\n"
+                f"🔁 Tried: {MAX_CAPTCHA_RETRIES}x\n\nSee screenshot.",
+                ss_fail)
+            return False
+
+        # ── Fill form ──
+        log.info("Filling form...")
         time.sleep(2)
         select_dropdown(driver, wait, 0, prefs["application_type"])
         select_dropdown(driver, wait, 1, prefs["country"])
@@ -216,61 +341,46 @@ def check_for_user(user: dict) -> bool:
         select_dropdown(driver, wait, 3, prefs["office"])
         select_dropdown(driver, wait, 4, prefs["service_type"])
         select_dropdown(driver, wait, 5, prefs["applicants"])
-        time.sleep(1)
+        save_screenshot(driver, "02_form_filled")
 
-        # ── STEP 3: Click NEXT ──
-        next_btn = driver.find_element(By.XPATH, "//button[contains(text(),'NEXT')] | //a[contains(text(),'NEXT')]")
+        # ── Click NEXT ──
+        log.info("Clicking NEXT...")
+        next_btn = driver.find_element(By.XPATH,
+            "//button[contains(text(),'NEXT')] | //a[contains(text(),'NEXT')]")
         next_btn.click()
         time.sleep(3)
+        save_screenshot(driver, "03_after_next")
 
-        # ── STEP 4: Check for available dates ──
-        page_source = driver.page_source.lower()
+        # ── Check dates ──
+        log.info("Checking for dates...")
+        dates = re.findall(r'\d{2}-\d{2}-\d{4}', driver.page_source)
+        log.info(f"Dates found: {dates}")
 
-        # Look for date patterns like "15-04-2026" or a calendar with available slots
-        import re
-        date_pattern = re.findall(r'\d{2}-\d{2}-\d{4}', driver.page_source)
-        
-        # Check for "no appointment" or "not available" messages
-        no_slot_keywords = ["no appointment", "no available", "no slot", "currently no", "not available"]
-        slot_found = any(kw not in page_source for kw in no_slot_keywords)
-
-        if date_pattern:
-            dates_str = ", ".join(set(date_pattern))
-            message = (
-                f"🟢 <b>SLOT FOUND!</b>\n\n"
-                f"👤 User: {user['name']}\n"
-                f"📅 Available date(s): <b>{dates_str}</b>\n"
-                f"🕒 Checked at: {now}\n\n"
-                f"👉 Book now: {TARGET_URL}"
-            )
-            notify(user, "✅ VisaMetric Slot Available!", message)
-            print(f"SLOT FOUND for {user['name']}: {dates_str}")
+        if dates:
+            dates_str = ", ".join(set(dates))
+            ss = save_screenshot(driver, "04_slot_found")
+            notify(user, "✅ Slot Available!",
+                f"🟢 <b>SLOT FOUND!</b>\n\n👤 {user['name']}\n📅 <b>{dates_str}</b>\n🕒 {now}\n\n👉 {TARGET_URL}",
+                ss)
             return True
         else:
-            message = (
-                f"🔴 <b>No slot found</b>\n\n"
-                f"👤 User: {user['name']}\n"
-                f"🕒 Checked at: {now}\n"
-                f"ℹ️ Next check in ~1 hour."
-            )
-            notify(user, "❌ No VisaMetric Slot", message)
-            print(f"No slot for {user['name']} at {now}")
+            save_screenshot(driver, "04_no_slot")
+            notify(user, "❌ No Slot", f"🔴 <b>No slot</b>\n👤 {user['name']}\n🕒 {now}\nNext check ~1hr.")
             return False
 
     except Exception as e:
-        error_msg = f"⚠️ <b>Error during check</b> for {user['name']} at {now}:\n<code>{str(e)}</code>"
-        notify(user, "VisaMetric Bot Error", error_msg)
-        print(f"Error: {e}")
+        log.exception(f"Unhandled error: {e}")
+        ss = save_screenshot(driver, "error")
+        notify(user, "Bot Error", f"⚠️ Error: <code>{e}</code>\nTime: {now}", ss)
         return False
-
     finally:
         driver.quit()
 
 
-# ── ENTRY POINT ───────────────────────────────────────────────────────────────
+# ── ENTRY ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"=== VisaMetric Checker started at {datetime.now()} ===")
+    log.info(f"=== VisaMetric Checker started {datetime.now()} ===")
     for user in USERS:
-        print(f"\nChecking for {user['name']}...")
+        log.info(f"\n{'='*50}\nUser: {user['name']}\n{'='*50}")
         check_for_user(user)
-    print("\n=== Done ===")
+    log.info("=== Done ===")
