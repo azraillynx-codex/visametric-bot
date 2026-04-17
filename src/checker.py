@@ -28,9 +28,9 @@ TELEGRAM_BOT_TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
 # Add each user here: name, email, telegram_chat_id, and their form preferences
 USERS = [
     {
-        "name": "User1",
-        "email": "user1@example.com",          # ← replace
-        "telegram_id": "123456789",            # ← replace
+        "name": "sonn",
+        "email": "exam.jimsonshajum@gmail.com",          # ← replace
+        "telegram_id": "5682340418",            # ← replace
         "prefs": {
             "application_type": "Schengen - Tourism/Family&Friend Visit",
             "country": "Ireland",
