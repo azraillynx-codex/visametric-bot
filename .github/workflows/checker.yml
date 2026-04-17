@@ -26,10 +26,15 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y \
             tesseract-ocr \
-            libgl1-mesa-glx \
+            libgl1 \
             libglib2.0-0 \
             chromium-browser \
-            chromium-chromedriver \
+            --no-install-recommends || \
+          sudo apt-get install -y \
+            tesseract-ocr \
+            libgl1 \
+            libglib2.0-0 \
+            chromium \
             --no-install-recommends
 
       - name: Install Python dependencies
