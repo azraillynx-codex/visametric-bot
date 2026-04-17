@@ -232,7 +232,16 @@ def get_driver():
     )
     # Route through residential proxy if configured
     if PROXY_URL:
-        log.info(f"Using proxy: {PROXY_URL.split('@')[-1]}")
+        # Chrome silently drops credentials from http:// proxy URLs (since Chrome 72).
+        # SOCKS5 with auth DOES work: socks5://user:pass@host:port
+        if PROXY_URL.startswith("http://") and "@" in PROXY_URL:
+            log.error(
+                "PROXY_URL uses http:// with credentials — Chrome will IGNORE auth "
+                "and fail with ERR_NO_SUPPORTED_PROXIES. "
+                "Change to socks5://user:pass@host:port"
+            )
+        host_part = PROXY_URL.split("@")[-1]
+        log.info(f"Using proxy: {host_part}")
         options.add_argument(f"--proxy-server={PROXY_URL}")
     else:
         log.warning("No PROXY_URL set — GitHub Actions IP may be blocked by Cloudflare")
