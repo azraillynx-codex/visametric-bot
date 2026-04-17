@@ -35,6 +35,9 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Check Chrome version
+        run: google-chrome-stable --version || chromium-browser --version || chromium --version
+
       - name: Run slot checker
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
@@ -42,6 +45,7 @@ jobs:
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           ADMIN_TELEGRAM_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
           python src/checker.py
 
