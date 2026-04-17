@@ -265,6 +265,10 @@ def get_driver():
     options.add_argument("--disable-infobars")
     options.add_argument("--lang=en-US,en")
     options.add_argument("--accept-lang=en-US,en;q=0.9")
+    # Ignore SSL errors — needed when routing HTTPS through a proxy
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--ignore-ssl-errors=yes")
+    options.add_argument("--allow-running-insecure-content")
     options.add_argument(
         f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
@@ -281,6 +285,9 @@ def get_driver():
                 "no_proxy": "localhost,127.0.0.1"
             },
             "verify_ssl": False,
+            # disable_capture=True: selenium-wire tunnels HTTPS instead of
+            # MITMing it — avoids NET::ERR_CERT_AUTHORITY_INVALID
+            "disable_capture": True,
         }
         return ucwire.Chrome(options=options, seleniumwire_options=sw_options, version_main=chrome_version)
     elif PROXY_URL and not SELENIUMWIRE_AVAILABLE:
@@ -290,6 +297,7 @@ def get_driver():
         log.warning("No PROXY_URL set — GitHub Actions IP may be blocked by Cloudflare")
 
     return uc.Chrome(options=options, version_main=chrome_version)
+
 
 
 # ── DROPDOWN ──────────────────────────────────────────────────────────────────
