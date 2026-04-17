@@ -284,10 +284,10 @@ def get_driver():
                 "https": PROXY_URL,
                 "no_proxy": "localhost,127.0.0.1"
             },
+            # NOTE: do NOT set disable_capture=True — it breaks HTTPS proxy auth.
+            # selenium-wire needs its MITM to inject Proxy-Authorization for CONNECT.
+            # --ignore-certificate-errors on Chrome handles the self-signed cert.
             "verify_ssl": False,
-            # disable_capture=True: selenium-wire tunnels HTTPS instead of
-            # MITMing it — avoids NET::ERR_CERT_AUTHORITY_INVALID
-            "disable_capture": True,
         }
         return ucwire.Chrome(options=options, seleniumwire_options=sw_options, version_main=chrome_version)
     elif PROXY_URL and not SELENIUMWIRE_AVAILABLE:
@@ -297,6 +297,7 @@ def get_driver():
         log.warning("No PROXY_URL set — GitHub Actions IP may be blocked by Cloudflare")
 
     return uc.Chrome(options=options, version_main=chrome_version)
+
 
 
 
@@ -326,7 +327,9 @@ def check_for_user(user: dict) -> bool:
     try:
         log.info(f"GET {TARGET_URL}")
         driver.get(TARGET_URL)
-        time.sleep(4)
+        # Extra wait for proxy latency — rotating residential proxies are slower
+        log.info("Waiting for page to load through proxy...")
+        time.sleep(12)
 
         log.info(f"Title: '{driver.title}' | URL: {driver.current_url}")
         ss_init = save_screenshot(driver, "01_initial_load")
