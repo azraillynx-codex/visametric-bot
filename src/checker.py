@@ -263,62 +263,39 @@ def check_for_user(user):
 
         ss(driver, "04_popup_closed")
 
-        # ── STEP 5: Navigate to Schengen Visa → Book an Appointment page ────────
-        # From screenshot: URL is /Ireland/Germany/en/p/book-an-appointment-national-visa
-        # We want the SCHENGEN one, not national visa
-        # The green "Book an Appointment" button is on this info page
-        log.info("STEP 5 — Going to Book an Appointment page (Schengen)")
+        # ── STEP 5: Go to Book an Appointment page via working URL ───────────────
+        # The working URL we confirmed: /Ireland/Germany/en/p/book-an-appointment-national-visa
+        # From that page, click "Schengen Visa" in the left sidebar
+        # OR directly go to the Schengen page via sidebar link
+        log.info("STEP 5 — Navigating to Book an Appointment info page")
         hs(2)
 
-        # Try direct URL for the schengen booking page first
-        schengen_url = "https://www.visametric.com/Ireland/Germany/en/p/book-an-appointment-schengen-visa"
-        log.info(f"Navigating to: {schengen_url}")
-        driver.get(schengen_url)
+        working_url = "https://www.visametric.com/Ireland/Germany/en/p/book-an-appointment-national-visa"
+        driver.get(working_url)
         hs(5)
-        pi(driver, "step5_schengen"); ss(driver, "05_schengen_page")
+        pi(driver, "step5_book_page"); ss(driver, "05_book_page")
 
-        # If that 404s, fall back to the general book page
-        if "404" in driver.title or "not found" in driver.page_source.lower()[:500]:
-            log.warning("Schengen URL 404'd, trying general book page")
-            driver.get("https://www.visametric.com/Ireland/Germany/en/p/book-an-appointment")
-            hs(5)
+        # From the screenshot we saw: left sidebar has "Schengen Visa" link
+        # Click that to get to the Schengen booking page with the green button
+        log.info("STEP 5b — Clicking 'Schengen Visa' in sidebar")
+        schengen_clicked = False
+        for xpath in [
+            "//a[normalize-space()='Schengen Visa']",
+            "//a[contains(text(),'Schengen Visa')]",
+            "//li/a[contains(text(),'Schengen')]",
+            "//ul//a[contains(text(),'Schengen')]",
+        ]:
+            els = driver.find_elements(By.XPATH, xpath)
+            for el in els:
+                if el.is_displayed():
+                    log.info(f"Schengen link: {el.get_attribute('href')}")
+                    el.click(); schengen_clicked = True; hs(5); break
+            if schengen_clicked: break
 
-        book_clicked = False
-        book_xpaths = [
-            "//a[contains(text(),'Book an Appointment')]",
-            "//h3[contains(text(),'Book an Appointment')]/parent::a",
-            "//h3[contains(text(),'Book an Appointment')]/../..",
-            "//*[contains(text(),'Book an Appointment') and contains(text(),'online')]/..",
-            "//*[contains(text(),'Book an Appointment')]",
-        ]
-        for xpath in book_xpaths:
-            try:
-                els = driver.find_elements(By.XPATH, xpath)
-                for el in els:
-                    if el.is_displayed():
-                        log.info(f"Found book link: {xpath} — text: '{el.text[:60]}'")
-                        el.click(); book_clicked = True; hs(6); break
-                if book_clicked: break
-            except Exception as e:
-                log.debug(f"XPath {xpath}: {e}")
+        if not schengen_clicked:
+            log.warning("Schengen sidebar link not found — staying on current page")
 
-        if not book_clicked:
-            links = driver.find_elements(By.TAG_NAME, "a")
-            log.error(f"Book btn NOT found. All links ({len(links)}):")
-            for lnk in links:
-                if lnk.text.strip():
-                    log.error(f"  href={lnk.get_attribute('href')} text='{lnk.text[:60]}'")
-            s = ss(driver, "05_no_book_btn")
-            notify(user, "⚠️ Book btn not found",
-                f"⚠️ Could not find Book an Appointment\n{driver.current_url}\n{now}", s)
-            return False
-
-        pi(driver, "step5"); ss(driver, "05_after_section_click")
-
-        if detect_block(driver) != "none":
-            s = ss(driver, "blocked_after_book")
-            notify(user, "🚫 Blocked", f"🚫 Blocked after book click\n{driver.current_url}\n{now}", s)
-            return False
+        pi(driver, "step5b_schengen"); ss(driver, "05b_schengen_page")
 
         # ── STEP 6: Click the GREEN "Book an Appointment" button ──────────────
         # After clicking the section, a new page loads with info text
