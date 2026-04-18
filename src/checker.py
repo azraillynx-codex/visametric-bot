@@ -68,6 +68,9 @@ def pi(driver, tag=""):
 
 def detect_block(driver):
     t = driver.title.lower(); s = driver.page_source.lower()
+    url = driver.current_url.lower()
+    # Never flag visametric pages as blocked
+    if "visametric.com" in url:                        return "none"
     if len(s) < 200:                                   return "EMPTY_PAGE"
     if "just a moment" in t or "checking your" in s:  return "CLOUDFLARE"
     if "ray id" in s and "cloudflare" in s:            return "CLOUDFLARE_BLOCK"
@@ -260,20 +263,31 @@ def check_for_user(user):
 
         ss(driver, "04_popup_closed")
 
-        # ── STEP 5: Click "Book an Appointment" section ───────────────────────
-        # This is the section in the middle of the page with the calendar icon
-        # "Book your appointment online and visit the VisaMetric Visa Application Center..."
-        # NOT the Application Status captcha on the right side — ignore that completely
-        log.info("STEP 5 — Click 'Book an Appointment' section")
+        # ── STEP 5: Navigate to Schengen Visa → Book an Appointment page ────────
+        # From screenshot: URL is /Ireland/Germany/en/p/book-an-appointment-national-visa
+        # We want the SCHENGEN one, not national visa
+        # The green "Book an Appointment" button is on this info page
+        log.info("STEP 5 — Going to Book an Appointment page (Schengen)")
         hs(2)
+
+        # Try direct URL for the schengen booking page first
+        schengen_url = "https://www.visametric.com/Ireland/Germany/en/p/book-an-appointment-schengen-visa"
+        log.info(f"Navigating to: {schengen_url}")
+        driver.get(schengen_url)
+        hs(5)
+        pi(driver, "step5_schengen"); ss(driver, "05_schengen_page")
+
+        # If that 404s, fall back to the general book page
+        if "404" in driver.title or "not found" in driver.page_source.lower()[:500]:
+            log.warning("Schengen URL 404'd, trying general book page")
+            driver.get("https://www.visametric.com/Ireland/Germany/en/p/book-an-appointment")
+            hs(5)
 
         book_clicked = False
         book_xpaths = [
-            # The section link/heading itself
             "//a[contains(text(),'Book an Appointment')]",
             "//h3[contains(text(),'Book an Appointment')]/parent::a",
             "//h3[contains(text(),'Book an Appointment')]/../..",
-            # The icon+text block — click the parent anchor
             "//*[contains(text(),'Book an Appointment') and contains(text(),'online')]/..",
             "//*[contains(text(),'Book an Appointment')]",
         ]
@@ -289,7 +303,6 @@ def check_for_user(user):
                 log.debug(f"XPath {xpath}: {e}")
 
         if not book_clicked:
-            # Log all links for diagnosis
             links = driver.find_elements(By.TAG_NAME, "a")
             log.error(f"Book btn NOT found. All links ({len(links)}):")
             for lnk in links:
